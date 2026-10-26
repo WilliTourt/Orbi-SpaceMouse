@@ -33,5 +33,5 @@
     "--compile-commands-dir=e:\\Folders\\Documents\\Dev\\ESPRESSIF\\ESP32\\VSCode\\ESP-IDF\\Orbi\\build"
   ],
   "idf.flashType": "UART",
-  "idf.port": "COM9"
+  "idf.port": "COM3"
 }
