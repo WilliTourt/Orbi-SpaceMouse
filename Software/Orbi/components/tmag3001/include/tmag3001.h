@@ -221,7 +221,7 @@ class TMAG3001 {
         bool    read();
 
         Raw     getRaw() { return _last_raw; };
-        Sample  get() { return _last_sample; };
+        Sample  getMt() { return _last_sample; };
         float   getTemperature() { return _temp_C; };
         uint8_t getAddr() const { return static_cast<uint8_t>(_addr); }
 

@@ -11,6 +11,7 @@
 #include "i2c_buspool.h"
 #include "tmag3001.h"
 #include "ws2812.h"
+#include "axp202.h"
 
 
 
@@ -27,6 +28,8 @@ TMAG3001 s1(IIC_A_SDA, IIC_A_SCL, TMAG3001::AddrPin::toGND); // IIC_A 0x34
 TMAG3001 s2(IIC_A_SDA, IIC_A_SCL, TMAG3001::AddrPin::toVCC); // IIC_A 0x35
 TMAG3001 s3(IIC_B_SDA, IIC_B_SCL, TMAG3001::AddrPin::toVCC); // IIC_B 0x35
 
+AXP202 pmu(IIC_B_SDA, IIC_B_SCL);                            // IIC_B 0x34
+
 WS2812 strip(PIN_WS2812, WS2812_COUNT);
 
 void led_init() {
@@ -38,24 +41,6 @@ void led_init() {
     io.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&io);
     gpio_set_level(PIN_LED, 1);
-}
-
-// 扫一遍 7 位地址空间，把有 ACK 的地址打出来
-void scan_bus(const char *name, i2c_master_bus_handle_t bus) {
-    if (bus == nullptr) {
-        printf("[IIC_%s] bus is NULL, skip scan\n", name);
-        return;
-    }
-
-    printf("[IIC_%s] scanning 0x08~0x77 ...\n", name);
-    int found = 0;
-    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
-        if (i2c_master_probe(bus, addr, 50) == ESP_OK) {
-            printf("    ACK 0x%02X\n", addr);
-            found++;
-        }
-    }
-    printf("[IIC_%s] %d device(s) answered\n", name, found);
 }
 
 // ---------------- 彩虹 ----------------
@@ -100,57 +85,80 @@ static void rainbow_task(void *) {
     }
 }
 
-void dump(const char *name, TMAG3001 &s) {
+void readMag(const char *name, TMAG3001 &s) {
     if (!s.read()) {
         printf("%s  read FAIL\n", name);
         return;
     }
-    TMAG3001::Raw    r = s.getRaw();
-    TMAG3001::Sample v = s.get();
-    printf("%s raw(%6d,%6d,%6d) %7.2f %7.2f %7.2f mT  %.1fC\n",
-           name, r.x, r.y, r.z, v.x_mT, v.y_mT, v.z_mT, s.getTemperature());
+    TMAG3001::Raw    raw = s.getRaw();
+    TMAG3001::Sample tesla = s.getMt();
+    printf("%s raw XYZ(%6d,%6d,%6d) (%7.2f,%7.2f,%7.2f) mT  %.1fC\n",
+           name, raw.x, raw.y, raw.z, tesla.x_mT, tesla.y_mT, tesla.z_mT, s.getTemperature());
 }
 
 extern "C" void app_main(void) {
-    led_init();
+    // led_init();
 
     printf("\n=== Orbi bring-up ===\n");
 
-    bool ok1 = s1.begin();
-    bool ok2 = s2.begin();
-    bool ok3 = s3.begin();
-    printf("TMAG U1(0x34@A): %s\n", ok1 ? "OK" : "FAIL");
-    printf("TMAG U2(0x35@A): %s\n", ok2 ? "OK" : "FAIL");
-    printf("TMAG U3(0x35@B): %s\n", ok3 ? "OK" : "FAIL");
-
-    // 总线扫描：确认 U1 到底在不在、在哪个地址
-    i2c_master_bus_handle_t busA = i2c_buspool_acquire(IIC_A_SDA, IIC_A_SCL);
-    i2c_master_bus_handle_t busB = i2c_buspool_acquire(IIC_B_SDA, IIC_B_SCL);
-    printf("--- bus scan (expect A:34,35  B:34*AXP,35) ---\n");
-    scan_bus("A", busA);
-    scan_bus("B", busB);
-    if (busA) i2c_buspool_release(busA);
-    if (busB) i2c_buspool_release(busB);
-    printf("--- scan done ---\n");
+    bool ok_u1 = s1.begin();
+    bool ok_u2 = s2.begin();
+    bool ok_u3 = s3.begin();
+    printf("TMAG U1(0x34@A): %s\n", ok_u1 ? "OK" : "FAIL");
+    printf("TMAG U2(0x35@A): %s\n", ok_u2 ? "OK" : "FAIL");
+    printf("TMAG U3(0x35@B): %s\n", ok_u3 ? "OK" : "FAIL");
 
     bool ok_strip = strip.begin();
     printf("WS2812 x%d on IO45: %s\n", WS2812_COUNT, ok_strip ? "OK" : "FAIL");
 
     if (ok_strip) {
-        strip.setBrightness(10);
-        // 彩虹自己跑一个任务，主循环还要打印传感器，别互相拖
+        strip.setBrightness(30);
         xTaskCreate(rainbow_task, "rainbow", 3072, nullptr, 3, nullptr);
     }
+
+    bool ok_pmu = pmu.begin();
+    printf("AXP202(0x34@B): %s\n", ok_pmu ? "OK" : "FAIL");
+    if (ok_pmu) {
+        pmu.setVbusCurrentLimit(AXP202::VbusCurrentLimit::Unlimited);
+        pmu.setChargeEnabled(true);
+        pmu.setChargeCurrent(1000);
+        pmu.setVhold(AXP202::Vhold::V4_7);
+        pmu.setVoff(AXP202::Voff::V2_8);
+        pmu.enableIrq(AXP202_IRQ1_VBUS_INSERT | AXP202_IRQ1_VBUS_REMOVE,
+                      0,
+                      AXP202_IRQ3_CHIP_OVER_TEMP);
+        printf("PMU rails: DCDC3(3V3)=%s\n", pmu.isRailEnabled(AXP202::PwrRail::DCDC3) ? "on" : "off");
+        pmu.enableCoulomb(true);
+        uint32_t chg = 0, dis = 0;
+        if (pmu.readCoulomb(chg, dis)) {
+            printf("PMU coulomb: chg=%lu dis=%lu\n",
+                   (unsigned long)chg, (unsigned long)dis);
+        }
+    }
+
     printf("=== ready ===\n");
 
-    int tick = 0;
+    uint8_t tick = 0;
     while (1) {
         gpio_set_level(PIN_LED, (tick & 1) ? 1 : 0);
 
-        if (ok1) dump("U1", s1);
-        if (ok2) dump("U2", s2);
-        if (ok3) dump("U3", s3);
-        printf("----\n");
+        if (ok_u1) readMag("U1", s1);
+        if (ok_u2) readMag("U2", s2);
+        if (ok_u3) readMag("U3", s3);
+
+        if ((tick % 20) == 0 && ok_pmu && pmu.update()) {
+            printf("Battery: %umV   OCV: %u%%   FuelGauge: %u%%\n",
+                pmu.getBatteryMillivolts(), pmu.getBatteryPercent(), pmu.getFuelGaugePercent());
+
+            uint32_t chg = 0, dis = 0;
+            if (pmu.readCoulomb(chg, dis)) {
+                printf("PMU coulomb: chg=%lu dis=%lu net=%.2fmAh\n",
+                        (unsigned long)chg, (unsigned long)dis,
+                        pmu.getBatteryMah(chg, dis));
+            }
+        }
+
+        printf("\n");
 
         tick++;
         vTaskDelay(pdMS_TO_TICKS(200));

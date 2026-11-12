@@ -1,9 +1,9 @@
 #include "axp202.h"
 
+#include "esp_rom_sys.h"
+
 #include "i2c_buspool.h"
 
-#define AXP202_I2C_ADDR   0x34
-#define AXP202_CHIP_ID    0x41
 #define AXP202_TIMEOUT_MS 100
 
 AXP202::AXP202(uint8_t sda, uint8_t scl) :
@@ -43,21 +43,6 @@ bool AXP202::_updateReg(uint8_t reg, uint8_t mask, uint8_t value) {
     return _writeReg(reg, now);
 }
 
-// 12-bit ADC: high 8 bits + low 4 bits
-uint16_t AXP202::_readH8L4(uint8_t reg_h8) {
-    // Address auto-increments, so H8 and the following L4 come in one transaction
-    uint8_t buf[2] = {0, 0};
-    if (!_readReg(reg_h8, buf, sizeof(buf))) return 0;
-    return static_cast<uint16_t>((static_cast<uint16_t>(buf[0]) << 4) | (buf[1] & 0x0F));
-}
-
-// 13-bit ADC: high 8 bits + low 5 bits (battery charge/discharge current)
-uint16_t AXP202::_readH8L5(uint8_t reg_h8) {
-    uint8_t buf[2] = {0, 0};
-    if (!_readReg(reg_h8, buf, sizeof(buf))) return 0;
-    return static_cast<uint16_t>((static_cast<uint16_t>(buf[0]) << 5) | (buf[1] & 0x1F));
-}
-
 /* ------------------------- Init ------------------------- */
 
 bool AXP202::begin() {
@@ -83,7 +68,8 @@ bool AXP202::begin() {
     }
 
     uint8_t id = 0;
-    if (!_readReg(AXP202_REG_IC_TYPE, &id, 1) || id != AXP202_CHIP_ID) {
+    
+    if (!_readReg(AXP202_REG_IC_TYPE, &id, 1) || (id != AXP202_CHIP_ID && id != AXP202_CHIP_ID_ALT)) {
         i2c_master_bus_rm_device(_dev);
         _dev = nullptr;
         i2c_buspool_release(_bus);
@@ -92,113 +78,193 @@ bool AXP202::begin() {
     }
 
     // Turn on the ADC channels we read from (only battery ones are on by default)
-    _updateReg(AXP202_REG_ADC_EN1,
-               AXP202_ADC1_BAT_VOL | AXP202_ADC1_BAT_CUR |
-               AXP202_ADC1_VBUS_VOL | AXP202_ADC1_VBUS_CUR,
-               AXP202_ADC1_BAT_VOL | AXP202_ADC1_BAT_CUR |
-               AXP202_ADC1_VBUS_VOL | AXP202_ADC1_VBUS_CUR);
+    const uint8_t adc1 = AXP202_ADC1_BAT_VOL | AXP202_ADC1_BAT_CUR |
+                         AXP202_ADC1_VBUS_VOL | AXP202_ADC1_VBUS_CUR;
+    _updateReg(AXP202_REG_ADC_EN1, adc1, adc1);
     _updateReg(AXP202_REG_ADC_EN2, AXP202_ADC2_TEMP, AXP202_ADC2_TEMP);
+
+    // Lock the charge profile instead of relying on the factory default nibble
+    setChargeTarget(ChargeTarget::V4_20);
+    setChargeCurrent(500);
+    setVbusCurrentLimit(VbusCurrentLimit::mA900);
+
+    // Sample rate is needed by the coulomb counter formula: 25 << n Hz
+    uint8_t rate = 0;
+    if (_readReg(AXP202_REG_ADC_RATE, &rate, 1)) {
+        _adc_rate_hz = static_cast<uint16_t>(25 << ((rate >> 6) & 0x03));
+    }
 
     return true;
 }
 
-/* ------------------------- Status ------------------------- */
+/* ------------------------- Sampling ------------------------- */
 
-bool AXP202::isUsbIn() {
-    uint8_t v = 0;
-    if (!_readReg(AXP202_REG_STATUS, &v, 1)) return false;
-    return (v & AXP202_STATUS_VBUS_PRESENT) != 0;
+bool AXP202::update() {
+    // 0x00..0x01: VBUS present + charge status
+    uint8_t status[2] = {0, 0};
+    if (!_readReg(AXP202_REG_STATUS, status, sizeof(status))) return false;
+
+    // 0x5A..0x5F: VBUS voltage/current, die temperature (6 bytes, auto-increment)
+    uint8_t vbus[6] = {0};
+    if (!_readReg(AXP202_REG_VBUS_ADC, vbus, sizeof(vbus))) return false;
+
+    // 0x78..0x7D: battery voltage, charge current, discharge current (6 bytes)
+    uint8_t battery[6] = {0};
+    if (!_readReg(AXP202_REG_BAT_ADC, battery, sizeof(battery))) return false;
+
+    _meas.vbus_present = (status[0] & AXP202_STATUS_VBUS_PRESENT) != 0;
+    _meas.over_temp    = (status[1] & AXP202_MODE_OVER_TEMP) != 0;
+    _meas.charging     = (status[1] & AXP202_MODE_CHARGING) != 0;
+    _meas.bat_present  = (status[1] & AXP202_MODE_BAT_PRESENT) != 0;
+
+    // 12-bit: high 8 bits + low 4 bits
+    _meas.vbus_mV    = static_cast<uint16_t>(((vbus[0] << 4) | (vbus[1] & 0x0F)) * 1.7f);
+    _meas.vbus_mA    = ((vbus[2] << 4) | (vbus[3] & 0x0F)) * 0.375f;
+    _meas.chip_temp_C = ((vbus[4] << 4) | (vbus[5] & 0x0F)) * 0.1f - 144.7f;
+
+    _meas.battery_mV = static_cast<uint16_t>(((battery[0] << 4) | (battery[1] & 0x0F)) * 1.1f);
+    // 13-bit: high 8 bits + low 5 bits
+    _meas.charge_mA    = ((battery[2] << 5) | (battery[3] & 0x1F)) * 0.5f;
+    _meas.discharge_mA = ((battery[4] << 5) | (battery[5] & 0x1F)) * 0.5f;
+
+    _meas.battery_percent = _meas.bat_present ? _percentFromMillivolts(_meas.battery_mV) : 0;
+    return true;
 }
 
-bool AXP202::isBatteryConnected() {
-    uint8_t v = 0;
-    if (!_readReg(AXP202_REG_MODE_CHGSTATUS, &v, 1)) return false;
-    return (v & AXP202_MODE_BAT_PRESENT) != 0;
-}
-
-bool AXP202::isCharging() {
-    uint8_t v = 0;
-    if (!_readReg(AXP202_REG_MODE_CHGSTATUS, &v, 1)) return false;
-    return (v & AXP202_MODE_CHARGING) != 0;
-}
-
-bool AXP202::isOverTemperature() {
-    uint8_t v = 0;
-    if (!_readReg(AXP202_REG_MODE_CHGSTATUS, &v, 1)) return false;
-    return (v & AXP202_MODE_OVER_TEMP) != 0;
-}
-
-/* ------------------------- Measurements ------------------------- */
-
-uint16_t AXP202::batteryMillivolts() {
-    return static_cast<uint16_t>(_readH8L4(AXP202_REG_BAT_VOL_H8) * 1.1f);
-}
-
-uint8_t AXP202::batteryPercent() {
-    if (!isBatteryConnected()) return 0;
-
-    // Rough Li-ion curve: 3.0V empty ... 4.15V full, 11 breakpoints
-    static const uint16_t table[11] = {
+uint8_t AXP202::_percentFromMillivolts(uint16_t mv) const {
+    static const uint16_t adc_table[11] = { // Rough
         3000, 3650, 3700, 3740, 3760, 3795,
         3840, 3910, 3980, 4070, 4150
     };
-    uint16_t mv = batteryMillivolts();
-    if (mv < table[0]) return 0;
+    if (mv < adc_table[0]) return 0;
 
     for (int i = 1; i < 11; ++i) {
-        if (mv < table[i]) {
-            uint16_t span = static_cast<uint16_t>(table[i] - table[i - 1]);
-            return static_cast<uint8_t>(i * 10 - (10 * (table[i] - mv)) / span);
+        if (mv < adc_table[i]) {
+            uint16_t span = static_cast<uint16_t>(adc_table[i] - adc_table[i - 1]);
+            return static_cast<uint8_t>(i * 10 - (10 * (adc_table[i] - mv)) / span);
         }
     }
     return 100;
 }
 
-float AXP202::chargeCurrentmA() {
-    return _readH8L5(AXP202_REG_BAT_CHGCUR_H8) * 0.5f;
+/* ------------------------- Charging ------------------------- */
+
+bool AXP202::setChargeTarget(ChargeTarget target) {
+    return _updateReg(AXP202_REG_CHARGE_CTL1, AXP202_CHG_TARGET_MASK,
+                      static_cast<uint8_t>(static_cast<uint8_t>(target) << 5));
 }
 
-float AXP202::dischargeCurrentmA() {
-    return _readH8L5(AXP202_REG_BAT_DISCHGCUR_H8) * 0.5f;
+bool AXP202::setVbusCurrentLimit(VbusCurrentLimit limit) {
+    return _updateReg(AXP202_REG_VBUS_IPSOUT, AXP202_VBUS_ILIM_MASK,
+                      static_cast<uint8_t>(static_cast<uint8_t>(limit) & AXP202_VBUS_ILIM_MASK));
 }
 
-uint16_t AXP202::vbusMillivolts() {
-    return static_cast<uint16_t>(_readH8L4(AXP202_REG_VBUS_VOL_H8) * 1.7f);
+bool AXP202::setVhold(Vhold level) {
+    if (level == Vhold::Off) {
+        return _updateReg(AXP202_REG_VBUS_IPSOUT, AXP202_VHOLD_EN, 0x00);
+    }
+    uint8_t bits = static_cast<uint8_t>(
+        AXP202_VHOLD_EN | ((static_cast<uint8_t>(level) << 3) & AXP202_VHOLD_MASK));
+    return _updateReg(AXP202_REG_VBUS_IPSOUT, AXP202_VHOLD_EN | AXP202_VHOLD_MASK, bits);
 }
 
-float AXP202::vbusCurrentmA() {
-    return _readH8L4(AXP202_REG_VBUS_CUR_H8) * 0.375f;
+bool AXP202::setVoff(Voff level) {
+    return _updateReg(AXP202_REG_VOFF, AXP202_VOFF_MASK,
+                      static_cast<uint8_t>(static_cast<uint8_t>(level) & AXP202_VOFF_MASK));
 }
 
-float AXP202::chipTemperature() {
-    return _readH8L4(AXP202_REG_INTERNAL_TEMP_H8) * 0.1f - 144.7f;
+bool AXP202::setChargeLedMode(ChargeLedMode mode) {
+    const uint8_t bits = static_cast<uint8_t>(
+        (static_cast<uint8_t>(mode) << 4) | AXP202_CHGLED_CTL_BY_REG);
+    return _updateReg(AXP202_REG_SHUTDOWN, AXP202_CHGLED_MODE_MASK | AXP202_CHGLED_CTL_BY_REG, bits);
 }
 
-/* ------------------------- Power ------------------------- */
+bool AXP202::setChargeCurrent(uint16_t milliamps) {
+    if (milliamps < AXP202_CHG_CURRENT_MIN) milliamps = AXP202_CHG_CURRENT_MIN;
+    if (milliamps > AXP202_CHG_CURRENT_MAX) milliamps = AXP202_CHG_CURRENT_MAX;
+
+    const uint16_t steps = static_cast<uint16_t>((milliamps - AXP202_CHG_CURRENT_MIN) /
+                                                 AXP202_CHG_CURRENT_STEP);
+    return _updateReg(AXP202_REG_CHARGE_CTL1, AXP202_CHG_CURRENT_MASK,
+                      static_cast<uint8_t>(steps & AXP202_CHG_CURRENT_MASK));
+}
+
+bool AXP202::setChargeEnabled(bool on) {
+    return _updateReg(AXP202_REG_CHARGE_CTL1, AXP202_CHG_EN, on ? AXP202_CHG_EN : 0x00);
+}
+
+/* ------------------------- Power rails ------------------------- */
+
+bool AXP202::isRailEnabled(PwrRail rail) {
+    const uint8_t bit = static_cast<uint8_t>(rail);
+    uint8_t vbus = 0;
+    if (!_readReg(AXP202_REG_LDO234_DC23_CTL, &vbus, 1)) return false;
+    return (vbus & bit) != 0;
+}
+
+bool AXP202::powerUp(PwrRail rail) {
+    const uint8_t bit = static_cast<uint8_t>(rail);
+    return _updateReg(AXP202_REG_LDO234_DC23_CTL, bit, bit);
+}
+
+bool AXP202::powerDown(PwrRail rail) {
+    return _updateReg(AXP202_REG_LDO234_DC23_CTL, static_cast<uint8_t>(rail), 0x00);
+}
 
 bool AXP202::shutdown() {
     return _writeReg(AXP202_REG_SHUTDOWN, AXP202_SHUTDOWN_BIT);
 }
 
-bool AXP202::isMainRailEnabled() {
-    uint8_t v = 0;
-    if (!_readReg(AXP202_REG_LDO234_DC23_CTL, &v, 1)) return false;
-    return (v & AXP202_PWR_DCDC3) != 0;
+/* ------------------------- Coulomb counter ------------------------- */
+
+bool AXP202::enableCoulomb(bool on) {
+    return _updateReg(AXP202_REG_COULOMB_CTL, AXP202_COULOMB_EN,
+                      on ? AXP202_COULOMB_EN : 0x00);
 }
 
-bool AXP202::powerDownUnusedRails() {
-    // All these rails are unloaded on this board (only their filter caps are attached).
-    // 0x12 is a shared register, so DCDC3 (bit1) must be preserved -> masked update
-    const uint8_t unused = AXP202_PWR_LDO3 | AXP202_PWR_DCDC2 |
-                           AXP202_PWR_LDO4 | AXP202_PWR_LDO2 | AXP202_PWR_EXTEN;
-    bool ok = _updateReg(AXP202_REG_LDO234_DC23_CTL, unused, 0x00);
+bool AXP202::clearCoulomb() {
+    // Bit5 clears itself once the counters are zeroed
+    return _updateReg(AXP202_REG_COULOMB_CTL, AXP202_COULOMB_CLEAR, AXP202_COULOMB_CLEAR);
+}
 
-    // Safety net: if DCDC3 got cleared, the board is already dead -> restore it
-    if (!isMainRailEnabled()) {
-        _updateReg(AXP202_REG_LDO234_DC23_CTL, AXP202_PWR_DCDC3, AXP202_PWR_DCDC3);
-        return false;
+bool AXP202::readCoulomb(uint32_t& charge, uint32_t& discharge) {
+    uint8_t ctl = 0;
+    if (!_readReg(AXP202_REG_COULOMB_CTL, &ctl, 1)) return false;
+
+    // Writing the unlock bit makes the counter registers readable; bit0 reports done
+    if (!_writeReg(AXP202_REG_COULOMB_CTL,
+                   static_cast<uint8_t>(ctl | AXP202_COULOMB_UNLOCK))) return false;
+
+    for (int i = 0; i < 5; ++i) {
+        if (_readReg(AXP202_REG_COULOMB_CTL, &ctl, 1) && (ctl & AXP202_COULOMB_UNLOCKED)) break;
+        esp_rom_delay_us(200);
     }
-    return ok;
+
+    // 0xB0..0xB7: charge counter then discharge counter, both big endian
+    uint8_t buf[8] = {0};
+    if (!_readReg(AXP202_REG_COULOMB_CHG, buf, sizeof(buf))) return false;
+
+    charge    = (static_cast<uint32_t>(buf[0]) << 24) |
+                (static_cast<uint32_t>(buf[1]) << 16) |
+                (static_cast<uint32_t>(buf[2]) << 8)  | buf[3];
+    discharge = (static_cast<uint32_t>(buf[4]) << 24) |
+                (static_cast<uint32_t>(buf[5]) << 16) |
+                (static_cast<uint32_t>(buf[6]) << 8)  | buf[7];
+    return true;
+}
+
+float AXP202::getBatteryMah(uint32_t charge, uint32_t discharge) const {
+    // Datasheet: C = 65536 * current_lsb * (charge - discharge) / 3600 / ADC rate
+    const float delta = static_cast<float>(static_cast<int64_t>(charge) -
+                                          static_cast<int64_t>(discharge));
+    const float rate = (_adc_rate_hz == 0) ? 25.0f : static_cast<float>(_adc_rate_hz);
+    return 65536.0f * 0.5f * delta / 3600.0f / rate;
+}
+
+uint8_t AXP202::getFuelGaugePercent() {
+    uint8_t percent = 0;
+    if (!_readReg(AXP202_REG_FUEL_GAUGE, &percent, 1)) return 0;
+    return static_cast<uint8_t>(percent & AXP202_FUELGAUGE_PERCENT);
 }
 
 /* ------------------------- Interrupts ------------------------- */
@@ -220,7 +286,7 @@ bool AXP202::readIrq(Irq& irq) {
     irq.pekey_long     = (s3 & AXP202_IRQ3_PEKEY_LONG) != 0;
     irq.chip_over_temp = (s3 & AXP202_IRQ3_CHIP_OVER_TEMP) != 0;
 
-    irq.alarmed = (s1 | s2 | s3) != 0;
+    irq.any = (s1 | s2 | s3) != 0;
     return true;
 }
 
