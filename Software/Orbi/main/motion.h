@@ -19,11 +19,16 @@ class Motion {
         void update(float b_meas[9]);
 
     private:
+        // for better readability
+        typedef float vector[3];
+        typedef float point[3];
+        typedef float field[3];
+
         struct Magnet {
             /*** Magnetic ***/
 
             float br; // mT
-            float b_meas[3]; // bx, by, bz
+            field b_meas; // bx, by, bz
             float b_sign[3]; // sign of the position and orientation
 
             /*** Position and orientation ***/
@@ -32,9 +37,8 @@ class Motion {
                 float x, y, z;
                 float rx, ry, rz;
             };
-            MagPose pose, pose_prev;
             MagPose base; // base position and orientation
-            float vel[6]; // vx, vy, vz, vrx, vry, vrz
+            // float vel[6]; // vx, vy, vz, vrx, vry, vrz
         } _mag[3];
 
         struct JacobianMatrix {
@@ -44,9 +48,12 @@ class Motion {
             float jtj_inv[6][6];
         } _j_mats;
 
-        Pose _joystick_pose;
+        Pose _joystick_pose, _joystick_pose_prev;
 
         float _calcBr(float bz, float R, float L);
-        void _solveForward(const uint8_t mag_idx, Magnet::MagPose pose, float out[3]); // Calculate single magnet's magnetic field
-        void _solveLM(float b_meas[9], float out_delta[6]);
+         // single magnet to single sensor
+        void _solveForward(const uint8_t mag_idx, const uint8_t sensor_idx,
+                           Magnet::MagPose pose, field out_predicted);
+        void _mergeFieldToSensor(field to_merge[3], field sensor_field);
+        void _solveLM(field b_meas[3], Pose &out_delta);
 };
