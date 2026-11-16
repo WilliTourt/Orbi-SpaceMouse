@@ -1,4 +1,4 @@
-﻿#include "motion.h"
+#include "motion.h"
 #include "config.h"
 #include <cmath>
 
@@ -18,6 +18,9 @@ Motion::Motion() {
                          *(CFG_SENSOR_COORDS[i]+1),
                          *(CFG_SENSOR_COORDS[i]+2) + CFG_HALL_TO_MAGNET_BOTTOM_Z,
                          0.0f, 0.0f, 0.0f };
+        _mag[i].pm[X] = _mag[i].base.x - CFG_JOYSTICK_PIVOT_COORD[X];
+        _mag[i].pm[Y] = _mag[i].base.y - CFG_JOYSTICK_PIVOT_COORD[Y];
+        _mag[i].pm[Z] = _mag[i].base.z - CFG_JOYSTICK_PIVOT_COORD[Z];
     }
 }
 
@@ -43,14 +46,35 @@ void Motion::update(float b_meas[9]) {
     }
 
     Pose delta;
-
     _solveLM(b_meas_field, delta);
-    _joystick_pose.x += delta.x;
-    _joystick_pose.y += delta.y;
-    _joystick_pose.z += delta.z;
-    _joystick_pose.rx += delta.rx;
-    _joystick_pose.ry += delta.ry;
-    _joystick_pose.rz += delta.rz;
+    for (int i = 0; i < 6; i++) ((float*)&_joystick_pose)[i] += ((float*)&delta)[i];
+
+}
+
+
+
+void Motion::JacobianMatrix::solve(float lambda) {
+    // Jt
+    for (int row = 0; row < 9; row++) {
+        for (int col = 0; col < 6; col++) {
+            j_transpose[col][row] = j[row][col];
+        }
+    }
+
+    // JtJ (symmetric)
+    for (int row = 0; row < 6; row++) {
+        for (int col = row; col < 6; col++) {
+            float sum = 0.0f;
+            for (int i = 0; i < 9; i++) sum += j_transpose[row][i] * j[i][col];
+            jtj[row][col] = sum;
+            jtj[col][row] = jtj[row][col];
+        }
+    }
+
+    // JtJ + λI, I is Marquardt scaling
+    for (int i = 0; i < 6; i++) jtj[i][i] += (lambda * jtj[i][i]);
+
+    // not going to fill JtJ_inv, using (JtJ + λI)delta = Jt(b_measurement − f(p)) to solve
 }
 
 float Motion::_calcBr(float bz, float R, float L) {
@@ -147,112 +171,236 @@ void Motion::_solveForward(const uint8_t mag_idx, const uint8_t sensor_idx,
     for (int i = 0; i < 3; i++) out_predicted[i] = k * b[i];
 }
 
-void Motion::_mergeFieldToSensor(field to_merge[3], field sensor_field) {
+void Motion::_solveForward(const uint8_t sensor_idx, Magnet::MagPose pose[3], field sensor_field) {
+    field to_merge[3] = { {0}, {0}, {0} };
+    for (int mag_idx = 0; mag_idx < 3; mag_idx++) {
+        _solveForward(mag_idx, sensor_idx, pose[mag_idx], to_merge[mag_idx]);
+    }
     for (int i = 0; i < 3; i++) {
         sensor_field[i] = to_merge[0][i] + to_merge[1][i] + to_merge[2][i];        
     }
 }
 
-void Motion::_solveLM(field b_meas[3], Pose &out_delta) {
-    constexpr uint32_t MAX_ITERATIONS = 15;
-    constexpr float DEADZONE = 0.1f;
+Motion::Magnet::MagPose Motion::_getMagPose(const uint8_t mag_idx, const Pose &joystick_pose) {
+    // to get a magnet's x,y,z pose, we need to rotate the vector from pivot to magnet base (pm)
+    vector pm_rot;
 
+    Magnet::MagPose magpose = Magnet::MagPose();
+
+    // magnet rotation is joystick rotation
+    magpose.rx = joystick_pose.rx;
+    magpose.ry = joystick_pose.ry;
+    magpose.rz = joystick_pose.rz;
+    
+    // building rotation matrix
+    const float cosx = cosf(magpose.rx), sinx = sinf(magpose.rx);
+    const float cosy = cosf(magpose.ry), siny = sinf(magpose.ry);
+    const float cosz = cosf(magpose.rz), sinz = sinf(magpose.rz);
+    const float ROT_MAT[3][3] = {
+        { cosy*cosz, cosz*sinx*siny-sinz*cosx, cosz*cosx*siny+sinz*sinx },
+        { cosy*sinz, sinz*sinx*siny+cosz*cosx, sinz*cosx*siny-cosz*sinx },
+        { -siny    , cosy*sinx               , cosy*cosx                }
+    };
+
+    pm_rot[X] = ROT_MAT[0][0] * _mag[mag_idx].pm[X] +
+                ROT_MAT[0][1] * _mag[mag_idx].pm[Y] +
+                ROT_MAT[0][2] * _mag[mag_idx].pm[Z];
+    pm_rot[Y] = ROT_MAT[1][0] * _mag[mag_idx].pm[X] + 
+                ROT_MAT[1][1] * _mag[mag_idx].pm[Y] + 
+                ROT_MAT[1][2] * _mag[mag_idx].pm[Z];
+    pm_rot[Z] = ROT_MAT[2][0] * _mag[mag_idx].pm[X] + 
+                ROT_MAT[2][1] * _mag[mag_idx].pm[Y] + 
+                ROT_MAT[2][2] * _mag[mag_idx].pm[Z];
+
+    // here we got magnet base coords after rotation
+    point m = { pm_rot[X] + CFG_JOYSTICK_PIVOT_COORD[X], 
+                pm_rot[Y] + CFG_JOYSTICK_PIVOT_COORD[Y], 
+                pm_rot[Z] + CFG_JOYSTICK_PIVOT_COORD[Z] };
+
+    // should add up joystick's displacement too
+    // and write xyz back to magpose
+    m[X] += joystick_pose.x;
+    m[Y] += joystick_pose.y;
+    m[Z] += joystick_pose.z;
+    magpose.x = m[X];
+    magpose.y = m[Y];
+    magpose.z = m[Z];
+
+    return magpose;
+}
+
+void Motion::_solveJacobianMat(const Pose &joystick_pose, field b_predict[3]) {
     constexpr float DISPLACEMENT_UNIT = 0.001f; // mm
     constexpr float ROTATION_UNIT = 0.0001f;    // Rad
 
-    Pose delta = Pose();
-    Magnet::MagPose magpose[3] = { Magnet::MagPose() }; // only for lm solver
+    Pose pose_disturbed = joystick_pose;
+    Magnet::MagPose magpose_disturbed[3] = { Magnet::MagPose() };
 
-    // to get every magnet's x,y,z pose, we need to rotate the vector from pivot to magnet base (pm0~2)
-    const vector pm0 = { _mag[0].base.x - CFG_JOYSTICK_PIVOT_COORD[X],
-                         _mag[0].base.y - CFG_JOYSTICK_PIVOT_COORD[Y],
-                         _mag[0].base.z - CFG_JOYSTICK_PIVOT_COORD[Z] };
-    const vector pm1 = { _mag[1].base.x - CFG_JOYSTICK_PIVOT_COORD[X],
-                         _mag[1].base.y - CFG_JOYSTICK_PIVOT_COORD[Y],
-                         _mag[1].base.z - CFG_JOYSTICK_PIVOT_COORD[Z] };
-    const vector pm2 = { _mag[2].base.x - CFG_JOYSTICK_PIVOT_COORD[X],
-                         _mag[2].base.y - CFG_JOYSTICK_PIVOT_COORD[Y],
-                         _mag[2].base.z - CFG_JOYSTICK_PIVOT_COORD[Z] };
-    vector pm0_rot, pm1_rot, pm2_rot;
+    field b_disturbed[3] = { {0}, {0}, {0} };
 
-    // because every iteration changes magpose, calc magnet xyz in while()
+    for (int col = 0; col < 6; col++) { // calc delta xyz on 1..3 columns, rx,ry,rz on 4..6
+        pose_disturbed = joystick_pose;
+        ((float*)&(pose_disturbed))[col] += (col < 3) ? DISPLACEMENT_UNIT : ROTATION_UNIT;
+        for (int mag_idx = 0; mag_idx < 3; mag_idx++) {
+            magpose_disturbed[mag_idx] = _getMagPose(mag_idx, pose_disturbed);
+        }
+        for (int sen_idx = 0; sen_idx < 3; sen_idx++) {
+            _solveForward(sen_idx, magpose_disturbed, b_disturbed[sen_idx]);
+        }
+
+        for (int row = 0; row < 9; row++) {
+            _j_mats.j[row][col] = b_disturbed[row / 3][row % 3] - b_predict[row / 3][row % 3];    
+            _j_mats.j[row][col] /= (col < 3) ? DISPLACEMENT_UNIT : ROTATION_UNIT; // delta / unit is derivative
+        }
+    }
+}
+
+// the only code that not written by myself, i am stressful about linear algebra
+bool Motion::_cholesky(const float A[6][6], const float b[6], Pose &delta) {
+    float L[6][6] = {0}; // lower triangle L
+
+    for (int row = 0; row < 6; row++) {
+        for (int col = 0; col <= row; col++) {
+            float sum = A[row][col];
+            for (int i = 0; i < col; i++) sum -= L[row][i] * L[col][i];
+
+            if (col == row) {
+                if (sum <= 0.0f) return false;
+                L[row][col] = sqrtf(sum);
+            } else {
+                L[row][col] = sum / L[col][col];
+            }
+        }
+    }
+
+    // dont know what the fuxk is going on
+    float y[6];
+    for (int i = 0; i < 6; i++) {
+        float s = b[i];
+        for (int k = 0; k < i; k++) s -= L[i][k] * y[k];
+        y[i] = s / L[i][i];
+    }
+
+    for (int i = 5; i >= 0; i--) {
+        float s = y[i];
+        for (int k = i + 1; k < 6; k++) s -= L[k][i] * ((float*)&delta)[k];
+        ((float*)&delta)[i] = s / L[i][i];
+    }
+
+    return true;
+}
+
+void Motion::_solveLM(field b_meas[3], Pose &out_delta) {
+    constexpr uint32_t MAX_ITERATIONS = 15;
+    constexpr float    DEADZONE = 1.0f;
+
+    constexpr float    LAMBDA_DEFAULT = 0.1f;
+    constexpr float    LAMBDA_STEP = 3.0f;
+    constexpr float    LAMBDA_MAX = 1000.0f;
+    constexpr float    LAMBDA_MIN = 0.02f;
+
+    constexpr float    MAX_STEP_MM = 1.0f;
+    constexpr float    MAX_STEP_RAD = 0.05f;
 
     // iters ctrl
     float residual_err = FLT_MAX;
     uint32_t iters = 0;
+    bool pose_changed = true; // to decide whether to calc residual_err and j mat again
+    // true on first round because nothing is computed yet
 
+    Magnet::MagPose magpose[3] = { Magnet::MagPose() }; // only for lm solver
+    // calc magnet xyz in every iteration
+
+    float lambda = LAMBDA_DEFAULT;
+    Pose iter_pose = _joystick_pose;
+    Pose iter_delta = Pose();
     field b_predict[3] = { {0}, {0}, {0} }; // sensors' predicted b field
-    field b_magnet_temp[3] = { {0}, {0}, {0} }; // temp field for merging
-
     while ((residual_err > DEADZONE) && (iters++ < MAX_ITERATIONS)) {
-        for (int i = 0; i < 3; i++) {
-            magpose[i].rx = _joystick_pose.rx;
-            magpose[i].ry = _joystick_pose.ry;
-            magpose[i].rz = _joystick_pose.rz;
-        }
-        
-        const float cosx = cosf(magpose[0].rx), sinx = sinf(magpose[0].rx);
-        const float cosy = cosf(magpose[0].ry), siny = sinf(magpose[0].ry);
-        const float cosz = cosf(magpose[0].rz), sinz = sinf(magpose[0].rz);
-        const float ROT_MAT[3][3] = {
-            { cosy*cosz, cosz*sinx*siny-sinz*cosx, cosz*cosx*siny+sinz*sinx },
-            { cosy*sinz, sinz*sinx*siny+cosz*cosx, sinz*cosx*siny-cosz*sinx },
-            { -siny    , cosy*sinx               , cosy*cosx                }
-        };
-
-        pm0_rot[X] = ROT_MAT[0][0] * pm0[X] + ROT_MAT[0][1] * pm0[Y] + ROT_MAT[0][2] * pm0[Z];
-        pm0_rot[Y] = ROT_MAT[1][0] * pm0[X] + ROT_MAT[1][1] * pm0[Y] + ROT_MAT[1][2] * pm0[Z];
-        pm0_rot[Z] = ROT_MAT[2][0] * pm0[X] + ROT_MAT[2][1] * pm0[Y] + ROT_MAT[2][2] * pm0[Z];
-
-        pm1_rot[X] = ROT_MAT[0][0] * pm1[X] + ROT_MAT[0][1] * pm1[Y] + ROT_MAT[0][2] * pm1[Z];
-        pm1_rot[Y] = ROT_MAT[1][0] * pm1[X] + ROT_MAT[1][1] * pm1[Y] + ROT_MAT[1][2] * pm1[Z];
-        pm1_rot[Z] = ROT_MAT[2][0] * pm1[X] + ROT_MAT[2][1] * pm1[Y] + ROT_MAT[2][2] * pm1[Z]; 
-
-        pm2_rot[X] = ROT_MAT[0][0] * pm2[X] + ROT_MAT[0][1] * pm2[Y] + ROT_MAT[0][2] * pm2[Z];
-        pm2_rot[Y] = ROT_MAT[1][0] * pm2[X] + ROT_MAT[1][1] * pm2[Y] + ROT_MAT[1][2] * pm2[Z];
-        pm2_rot[Z] = ROT_MAT[2][0] * pm2[X] + ROT_MAT[2][1] * pm2[Y] + ROT_MAT[2][2] * pm2[Z];
-
-        // here we got magnet base coords after rotation
-        point m0 = { pm0_rot[X] + CFG_JOYSTICK_PIVOT_COORD[X], 
-                    pm0_rot[Y] + CFG_JOYSTICK_PIVOT_COORD[Y], 
-                    pm0_rot[Z] + CFG_JOYSTICK_PIVOT_COORD[Z] };
-        point m1 = { pm1_rot[X] + CFG_JOYSTICK_PIVOT_COORD[X], 
-                    pm1_rot[Y] + CFG_JOYSTICK_PIVOT_COORD[Y], 
-                    pm1_rot[Z] + CFG_JOYSTICK_PIVOT_COORD[Z] };
-        point m2 = { pm2_rot[X] + CFG_JOYSTICK_PIVOT_COORD[X], 
-                    pm2_rot[Y] + CFG_JOYSTICK_PIVOT_COORD[Y], 
-                    pm2_rot[Z] + CFG_JOYSTICK_PIVOT_COORD[Z] };
-
-        // should add up joystick's displacement too
-        // and write xyz back to magpose
-        point* m[3] = { &m0, &m1, &m2 };
-        for (int i = 0; i < 3; i++) {
-            (*m[i])[X] += _joystick_pose.x;
-            (*m[i])[Y] += _joystick_pose.y;
-            (*m[i])[Z] += _joystick_pose.z;
-            magpose[i].x = (*m[i])[X];
-            magpose[i].y = (*m[i])[Y];
-            magpose[i].z = (*m[i])[Z];
-        }
-        
-        residual_err = 0.0f;
-        for (int sen_idx = 0; sen_idx < 3; sen_idx++) {
+         // if pose unchanged, predictions and J mat are still valid so no need to calc them again
+        if (pose_changed) {
             for (int mag_idx = 0; mag_idx < 3; mag_idx++) {
-                _solveForward(mag_idx, sen_idx, magpose[mag_idx], b_magnet_temp[mag_idx]);
+                magpose[mag_idx] = _getMagPose(mag_idx, iter_pose);
             }
-            _mergeFieldToSensor(b_magnet_temp, b_predict[sen_idx]);
 
-            // add every sensor's x,y,z error
-            for (int i = 0; i < 3; i++) residual_err += fabsf(b_meas[sen_idx][i] - b_predict[sen_idx][i]);
+            // step 1: residual error
+            residual_err = 0.0f;
+            for (int sen_idx = 0; sen_idx < 3; sen_idx++) {
+                _solveForward(sen_idx, magpose, b_predict[sen_idx]);
+
+                // add every sensor's x,y,z error
+                for (int i = 0; i < 3; i++) residual_err += fabsf(b_meas[sen_idx][i] - b_predict[sen_idx][i]);
+            }
+
+            // step 2: get j mat and (JtJ + λI)
+            _solveJacobianMat(iter_pose, b_predict);
+            _j_mats.solve(lambda);
         }
 
-        for (int sen_idx = 0; sen_idx < 3; sen_idx++) {
-            for (int mag_idx = 0; mag_idx < 3; mag_idx++) {
-                magpose[mag_idx].x +=
+        // step 3: calc Jtr ( Jt(b_meas - b_predict) )
+        float jtr[6] = {0};
+        for (int row = 0; row < 6; row++) {
+            for (int col = 0; col < 9; col++) {
+                jtr[row] += _j_mats.j_transpose[row][col]
+                          * (b_meas[col / 3][col % 3] - b_predict[col / 3][col % 3]);
             }
         }
 
+        // step 4: solve delta (Cholesky decomposition A(SPD) = LLt)
+        while (!_cholesky(_j_mats.jtj, jtr, iter_delta) && (lambda < LAMBDA_MAX)) {
+            lambda *= LAMBDA_STEP;
+            _j_mats.solve(lambda);
+        }
+        // if lambda is very high, but still unsolved, discard this iteration
+        if (!_cholesky(_j_mats.jtj, jtr, iter_delta)) break;
+
+        // step 5: clamp delta
+        for (int i = 0; i < 6; i++) {
+            const float clamp = (i < 3) ? MAX_STEP_MM : MAX_STEP_RAD;
+            if (((float*)&iter_delta)[i] > clamp) {
+                ((float*)&iter_delta)[i] = clamp;
+            } else if (((float*)&iter_delta)[i] < -clamp) {
+                ((float*)&iter_delta)[i] = -clamp;
+            }
+        }
+
+        // step 6: update pose, lambda and start next iteration
+        // if pose_preview shows a lower residual error, then update pose and lambda
+        Pose pose_preview = iter_pose;
+        Magnet::MagPose magpose_preview[3] = { Magnet::MagPose() };
+        field b_predict_preview[3] = { {0}, {0}, {0} };
+        float residual_err_preview = 0.0f;
+
+        for (int i = 0; i < 6; i++) ((float*)&pose_preview)[i] += ((float*)&iter_delta)[i];
+        for (int mag_idx = 0; mag_idx < 3; mag_idx++) {
+            magpose_preview[mag_idx] = _getMagPose(mag_idx, pose_preview);
+        }
+        for (int sen_idx = 0; sen_idx < 3; sen_idx++) {
+            _solveForward(sen_idx, magpose_preview, b_predict_preview[sen_idx]);
+            for (int i = 0; i < 3; i++) {
+                residual_err_preview += fabsf(b_meas[sen_idx][i] - b_predict_preview[sen_idx][i]);
+            }
+        }
+
+        if (residual_err_preview < residual_err) {
+            lambda /= LAMBDA_STEP;
+            lambda = (lambda < LAMBDA_MIN) ? LAMBDA_MIN : lambda;
+
+            iter_pose = pose_preview;
+            residual_err = residual_err_preview;
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    b_predict[i][j] = b_predict_preview[i][j];
+                }
+            }
+            pose_changed = true;
+        } else {
+            lambda *= LAMBDA_STEP;
+            pose_changed = false;
+        }
     }
 
-    // for (int i = 0; i < 3; i++) _mag[i].pose_prev = _mag[i].pose;
+    // apply overall delta
+    for (int i = 0; i < 6; i++) {
+        ((float*)&out_delta)[i] = ((float*)&iter_pose)[i] - ((float*)&_joystick_pose)[i];
+    }
 }
