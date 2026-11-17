@@ -10,12 +10,21 @@ class Motion {
         };
 
         Motion();
-        ~Motion();
+        // ~Motion();
 
+        // Latest solve result, should be all zeros at resting pose
         Pose getPose() { return _joystick_pose; };
 
-        // void begin(float b_stable_meas[9]);
+        // setup, call while the joystick is untouched
+        void begin(float b_stable_meas[9]);
+
+        // Solves each magnet's Br, its field sign and the bias
+        // between measurement and model prediction.
+        // Safe to call again at runtime to re-zero
         void calibrate(float b_stable_meas[9]);
+
+        // Takes single sample and runs the LM solver, moving
+        // _joystick_pose towards the pose that fits the reading
         void update(float b_meas[9]);
 
     private:
@@ -28,8 +37,7 @@ class Motion {
             /*** Magnetic ***/
 
             float br; // mT
-            field b_meas; // bx, by, bz
-            float b_sign[3]; // sign of the position and orientation
+            float b_sign; // sign of the N/S pole
 
             /*** Position and orientation ***/
 
@@ -46,12 +54,17 @@ class Motion {
             float j[9][6]; // 9 rows, 6 columns
             float j_transpose[6][9]; // 6 rows, 9 columns
             float jtj[6][6];
+            float jtj_damped[6][6]; // jtj + lambdaI
             // float jtj_inv[6][6];
 
-            void solve(float lambda); // solve jt, jtj after j has been filled
+            void solve(); // solve jt, jtj after j has been filled
+            void damp(float lambda); // get jtj + lambdaI
         } _j_mats;
 
-        Pose _joystick_pose, _joystick_pose_prev;
+        // previous pose is designed for velocity and pose estimation
+        // seems to be not practical, not going to use it
+        Pose _joystick_pose/*, _joystick_pose_prev*/;
+        field _b_bias[3];
 
         float _calcBr(float bz, float R, float L);
 

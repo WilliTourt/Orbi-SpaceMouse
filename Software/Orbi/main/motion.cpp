@@ -10,7 +10,7 @@ static constexpr float PI = 3.14159265359f;
 static constexpr float PI2 = 6.28318530718f;
 
 Motion::Motion() {
-    _joystick_pose = Pose(); _joystick_pose_prev = Pose();
+    _joystick_pose = Pose();
     _mag[0] = Magnet(); _mag[1] = Magnet(); _mag[2] = Magnet();
 
     for (int i = 0; i < 3; i++) {
@@ -24,9 +24,9 @@ Motion::Motion() {
     }
 }
 
-// void Motion::begin(float b_stable_meas[9]) {
-    
-// }
+void Motion::begin(float b_stable_meas[9]) {
+    calibrate(b_stable_meas);
+}
 
 void Motion::calibrate(float b_stable_meas[9]) {
     const float br[3] = {
@@ -34,26 +34,42 @@ void Motion::calibrate(float b_stable_meas[9]) {
         _calcBr(b_stable_meas[5], CFG_MAGNET_RADIUS, CFG_MAGNET_LENGTH),
         _calcBr(b_stable_meas[8], CFG_MAGNET_RADIUS, CFG_MAGNET_LENGTH)
     };
-    for (int i = 0; i < 3; i++) _mag[i].br = br[i];
+    for (int i = 0; i < 3; i++) {
+        _mag[i].br = br[i];
+        _mag[i].b_sign = (b_stable_meas[i * 3 + 2] > 0.0f) ? -1.0f : 1.0f;
+    }
+
+    // calc bias
+    const Pose zero = Pose();
+    Magnet::MagPose rest_pose[3];
+    field b_rest_predict[3]; // forward solver calculated resting vals
+    for (int i = 0; i < 3; i++) rest_pose[i] = _getMagPose(i, zero);
+
+    for (int s = 0; s < 3; s++) _solveForward(s, rest_pose, b_rest_predict[s]);
+
+    for (int i = 0; i < 3; i++) {
+        for (int k = 0; k < 3; k++) {
+            _b_bias[i][k] = b_stable_meas[i * 3 + k] - b_rest_predict[i][k];
+        }
+    }
 }
 
 void Motion::update(float b_meas[9]) {
     field b_meas_field[3];
     for (int i = 0; i < 3; i++) {
-        b_meas_field[i][X] = b_meas[i * 3 + 0];
-        b_meas_field[i][Y] = b_meas[i * 3 + 1];
-        b_meas_field[i][Z] = b_meas[i * 3 + 2];
+        b_meas_field[i][X] = b_meas[i * 3 + 0] - _b_bias[i][X];
+        b_meas_field[i][Y] = b_meas[i * 3 + 1] - _b_bias[i][Y];
+        b_meas_field[i][Z] = b_meas[i * 3 + 2] - _b_bias[i][Z];
     }
 
-    Pose delta;
+    Pose delta = Pose();
     _solveLM(b_meas_field, delta);
     for (int i = 0; i < 6; i++) ((float*)&_joystick_pose)[i] += ((float*)&delta)[i];
-
 }
 
 
 
-void Motion::JacobianMatrix::solve(float lambda) {
+void Motion::JacobianMatrix::solve() {
     // Jt
     for (int row = 0; row < 9; row++) {
         for (int col = 0; col < 6; col++) {
@@ -71,10 +87,14 @@ void Motion::JacobianMatrix::solve(float lambda) {
         }
     }
 
-    // JtJ + λI, I is Marquardt scaling
-    for (int i = 0; i < 6; i++) jtj[i][i] += (lambda * jtj[i][i]);
-
     // not going to fill JtJ_inv, using (JtJ + λI)delta = Jt(b_measurement − f(p)) to solve
+}
+
+void Motion::JacobianMatrix::damp(float lambda) {
+    for (int row = 0; row < 6; row++)
+        for (int col = 0; col < 6; col++) jtj_damped[row][col] = jtj[row][col];
+    // JtJ + λI, I is Marquardt scaling
+    for (int i = 0; i < 6; i++) jtj_damped[i][i] += (lambda * jtj[i][i]);
 }
 
 float Motion::_calcBr(float bz, float R, float L) {
@@ -167,7 +187,7 @@ void Motion::_solveForward(const uint8_t mag_idx, const uint8_t sensor_idx,
         }
     }
 
-    const float k = MUR * _mag[mag_idx].br / (4.0f * PI);
+    const float k = (MUR * _mag[mag_idx].br * _mag[mag_idx].b_sign) / (4.0f * PI);
     for (int i = 0; i < 3; i++) out_predicted[i] = k * b[i];
 }
 
@@ -331,10 +351,12 @@ void Motion::_solveLM(field b_meas[3], Pose &out_delta) {
                 for (int i = 0; i < 3; i++) residual_err += fabsf(b_meas[sen_idx][i] - b_predict[sen_idx][i]);
             }
 
-            // step 2: get j mat and (JtJ + λI)
+            // step 2: get j mat and JtJ
             _solveJacobianMat(iter_pose, b_predict);
-            _j_mats.solve(lambda);
+            _j_mats.solve();
         }
+
+        _j_mats.damp(lambda);
 
         // step 3: calc Jtr ( Jt(b_meas - b_predict) )
         float jtr[6] = {0};
@@ -346,12 +368,13 @@ void Motion::_solveLM(field b_meas[3], Pose &out_delta) {
         }
 
         // step 4: solve delta (Cholesky decomposition A(SPD) = LLt)
-        while (!_cholesky(_j_mats.jtj, jtr, iter_delta) && (lambda < LAMBDA_MAX)) {
+        while (!_cholesky(_j_mats.jtj_damped, jtr, iter_delta) && (lambda < LAMBDA_MAX)) {
             lambda *= LAMBDA_STEP;
-            _j_mats.solve(lambda);
+            _j_mats.solve();
+            _j_mats.damp(lambda);
         }
         // if lambda is very high, but still unsolved, discard this iteration
-        if (!_cholesky(_j_mats.jtj, jtr, iter_delta)) break;
+        if (!_cholesky(_j_mats.jtj_damped, jtr, iter_delta)) break;
 
         // step 5: clamp delta
         for (int i = 0; i < 6; i++) {
