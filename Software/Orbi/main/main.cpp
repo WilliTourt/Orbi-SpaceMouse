@@ -13,7 +13,14 @@
 #include "ws2812.h"
 #include "axp202.h"
 
+#include "config.h"
+#include "sys.h"
 
+// 0 = normal firmware (Sys drives everything)
+// 1 = old single-loop bring-up, prints all three sensors every 200 ms
+#define ORBI_BRINGUP_MODE 0
+
+#if ORBI_BRINGUP_MODE
 
 #define PIN_LED        GPIO_NUM_10
 #define PIN_WS2812     GPIO_NUM_45
@@ -85,7 +92,7 @@ static void rainbow_task(void *) {
     }
 }
 
-void readMag(const char *name, TMAG3001 &s) {
+static void readMag(const char *name, TMAG3001 &s) {
     if (!s.read()) {
         printf("%s  read FAIL\n", name);
         return;
@@ -96,9 +103,7 @@ void readMag(const char *name, TMAG3001 &s) {
            name, raw.x, raw.y, raw.z, tesla.x_mT, tesla.y_mT, tesla.z_mT, s.getTemperature());
 }
 
-extern "C" void app_main(void) {
-    // led_init();
-
+static void bringup() {
     printf("\n=== Orbi bring-up ===\n");
 
     bool ok_u1 = s1.begin();
@@ -163,4 +168,14 @@ extern "C" void app_main(void) {
         tick++;
         vTaskDelay(pdMS_TO_TICKS(200));
     }
+}
+
+#endif // ORBI_BRINGUP_MODE
+
+extern "C" void app_main(void) {
+#if ORBI_BRINGUP_MODE
+    bringup();
+#else
+    Sys::instance().start();
+#endif
 }

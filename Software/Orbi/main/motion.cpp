@@ -1,6 +1,7 @@
 #include "motion.h"
 #include "config.h"
 #include <cmath>
+#include <cfloat>
 
 static constexpr float MU0 = 1.25663706127e-6f; // Vacuum permeability
 static constexpr float MUR = 1.00000037f;       // Relative permeability of air
