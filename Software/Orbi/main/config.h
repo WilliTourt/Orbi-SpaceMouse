@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -85,7 +85,7 @@ class Config {
 
         bool load();
         bool save();
-        void reset() { _blob.cfg = UserConfig(); }
+        void reset() { _blob.cfg = {}; }
 
         UserConfig&       get()       { return _blob.cfg; }
         const UserConfig& get() const { return _blob.cfg; }
@@ -98,11 +98,11 @@ class Config {
             UserConfig cfg;
         } _blob;
 
-        static constexpr char *TAG = "config";
+        static constexpr char     *NVS_NAMESPACE = "orbi";
+        static constexpr char     *NVS_KEY       = "user_cfg";
 
-        static constexpr char *NVS_NAMESPACE = "orbi";
-        static constexpr char *NVS_KEY       = "user_cfg";
-        static constexpr uint16_t CFG_MAGIC  = 0x0B01;
+        static constexpr uint32_t CFG_MAGIC      = 0x4F524249; // ORBI
+        static constexpr uint16_t CFG_VERSION    = 1;
 
         bool _ready = false;
 };

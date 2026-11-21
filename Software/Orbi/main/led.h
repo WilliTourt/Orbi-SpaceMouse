@@ -97,6 +97,7 @@ class Led {
         // call at a steady 20..30 ms; drives all animation
         void update();
 
+        // TODO
         // These two getters can be used when PC reads config.
         // Now is not used
         // SysEffect getSys() const { return _effects.sys; }
