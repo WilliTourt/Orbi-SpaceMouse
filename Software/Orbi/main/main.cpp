@@ -16,11 +16,11 @@
 #include "config.h"
 #include "sys.h"
 
-// 0 = normal firmware (Sys drives everything)
-// 1 = old single-loop bring-up, prints all three sensors every 200 ms
-#define ORBI_BRINGUP_MODE 0
+// 0 = normal firmware
+// 1 = DEBUGGING
+#define ORBI_DEBUGGING 1
 
-#if ORBI_BRINGUP_MODE
+#if ORBI_DEBUGGING
 
 #define PIN_LED        GPIO_NUM_10
 #define PIN_WS2812     GPIO_NUM_45
@@ -170,10 +170,10 @@ static void bringup() {
     }
 }
 
-#endif // ORBI_BRINGUP_MODE
+#endif // ORBI_DEBUGGING
 
 extern "C" void app_main(void) {
-#if ORBI_BRINGUP_MODE
+#if ORBI_DEBUGGING
     bringup();
 #else
     Sys::instance().start();
