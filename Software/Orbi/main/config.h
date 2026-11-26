@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
@@ -54,24 +54,26 @@ constexpr uint8_t CFG_PIN_KEY2  = 8;
 // Everything below is what the PC-side app is allowed to change at runtime.
 struct UserConfig {
     // joystick
-    float deadzone_mm   = 0.05f;   // per axis displacement deadzone
-    float deadzone_rad  = 0.0008f; // per axis rotation deadzone
-    float speed_mm_s    = 60.0f;   // full travel of a 1 mm push (mm/s)
-    float speed_rad_s   = 2.0f;    // 1 rad tilt (rad/s)
-    uint8_t invert_mask = 0;       // bit0..2 = xyz, bit3..5 = rx,ry,rz
+    float    joystick_deadzone_mm    = 0.05f;   // per axis displacement deadzone
+    float    joystick_deadzone_rad   = 0.0008f; // per axis rotation deadzone
+    float    joystick_speed_mm_s     = 60.0f;   // full travel of a 1 mm push (mm/s)
+    float    joystick_speed_rad_s    = 2.0f;    // 1 rad tilt (rad/s)
+    uint8_t  joystick_invert_mask    = 0;       // 1 means invert this axis, bit0..2 = xyz, bit3..5 = rx,ry,rz
+    float    joystick_full_scale_mm  = 1.5f;    // max push, adjust on PC
+    float    joystick_full_scale_rad = 0.14f;   // max rotation, adjust on PC
 
     // RGB LED
-    uint8_t led_brightness = 30;   // percent
+    uint8_t  led_brightness = 30;   // percent
     uint32_t led_color_plain = 0x000000; // 0xRRGGBB
-    bool    led_enabled    = true;
+    bool     led_enabled    = true;
 
     // HID
-    uint8_t transport = 0;         // 0 = auto, 1 = BLE only, 2 = USB only
+    uint8_t  hid_transport = 0;         // 0 = auto, 1 = BLE only, 2 = USB only
 
     // calibration (written back by Joystick::calibrate)
-    uint8_t calibrated = 0;
-    float   br[3] = { 0.0f, 0.0f, 0.0f };
-    float   pose_zero[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    uint8_t  calib_calibrated = 0;
+    float    calib_br[3] = { 0.0f, 0.0f, 0.0f };
+    float    calib_pose_zero[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
 /**********************************************************************/
@@ -98,8 +100,8 @@ class Config {
             UserConfig cfg;
         } _blob;
 
-        static constexpr char     *NVS_NAMESPACE = "orbi";
-        static constexpr char     *NVS_KEY       = "user_cfg";
+        static constexpr const char* NVS_NAMESPACE = "orbi";
+        static constexpr const char* NVS_KEY       = "user_cfg";
 
         static constexpr uint32_t CFG_MAGIC      = 0x4F524249; // ORBI
         static constexpr uint16_t CFG_VERSION    = 1;

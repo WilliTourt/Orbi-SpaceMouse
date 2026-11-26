@@ -74,9 +74,8 @@
  *      │   │   Value: { Target value handle 0x0013, Property is Read, UUID is 0x2A4B }
  *      │   │
  *      │   └── [Handle: 0x0013] [UUID: 0x2A4B] (Characteristic Value)
- *      │       Value: [...]
+ *      │       Value: [...] // (the report format definition)
  *      │       // report map is an array tells host which byte indicates what
- *      │       // (the report format definition)
  *      │
  *      ├── [Handle: 0x0014] [UUID: 0x2803] (Characteristic Decl) —— HID Control Point // host to device
  *      │   │   Value: { Target value handle 0x0015, Property is WriteNoResp, UUID is 0x2A4C }
@@ -115,41 +114,56 @@ class HID {
         };
 
         // use a pointer instead of copying it
-        HID(const UserConfig *cfg) : _cfg(cfg) {}
+        HID(const UserConfig *cfg);
 
         bool begin(TransType type);
-        void end(TransType type);
+        bool end(TransType type);
 
         bool isReady() const { return _dev != nullptr; }
-        bool isConnected() const;
+        bool isConnected() const { return _connected; }
         TransType getTransType() const { return _trans_type; }
 
-        bool send(const float axis[6]);
-        void setButton(uint8_t bit, bool pressed);
+        void HID::setPose(const float pose[6]); // x, y, z, rx, ry, rz
+        void setButton(uint8_t bit, bool triggered); // bit0..2 = xyz, bit3..5 = rx,ry,rz
         void setBattery(uint8_t percent); // only available for ble
+        bool send();
 
     private:
-        static constexpr char* DEVICE_NAME = "Orbi";
-        static constexpr char* MANUFACTURER_NAME = "WilliTourt";
+        static HID* _inst;
+
+        static constexpr const char* DEVICE_NAME       = "Orbi";
+        static constexpr const char* MANUFACTURER_NAME = "WilliTourt";
+        static constexpr uint16_t VENDOR_ID            = 0x256F; // 3Dconnexion
+        static constexpr uint16_t PRODUCT_ID           = 0xC635; // SpaceMouse Compact
+        static constexpr uint16_t VERSION              = 0x0100; // 1.0.0
+        static constexpr const char* SERIAL_NUMBER     = "Orbi0100"; // TODO: Generate a unique serial number
+
+        static constexpr uint16_t HID_LOGICAL_MAXIMUM = 350;
 
         bool _beginBle();
-        bool _beginUsb();
+        bool _beginUsb(); // TODO
         bool _endBle();
-        bool _endUsb();
+        bool _endUsb(); // TODO
+
+        static void _eventCallback(void *arg, esp_event_base_t base, int32_t id, void *data);
+        static void _hostTask(void *param); // nimble_port_run(), (ATT, GATT, SM, GAP)
+
+        int16_t _pose2Report(float in, float deadzone, float max);
 
         const UserConfig *_cfg = nullptr;
 
         TransType _trans_type = TransType::None;
         esp_hidd_dev_t *_dev = nullptr;
+        bool _connected = false;
 
         uint8_t _battery = 100;
 
-        // the six axes after deadzone and speed scaling, already in HID units
+        // the six axes after deadzone and full scale normalization, already in HID units,
+        // and the button bits
         struct Report {
-            int16_t dx, dy, dz;
-            int16_t drx, dry, drz;
+            int16_t pose[6];
             uint8_t buttons;        // bit 7-6: reserved, bit 5-3: key2, bit 2-0: key1
-            // every key: single, double, and long press from MSB to LSB
+                                    // every key: single, double, and long press from MSB to LSB
         } _report = {};
         uint8_t _report_buf[13] = {};
 
@@ -180,4 +194,6 @@ class HID {
 
             0xC0                                // End Collection
         };
+
+        static esp_hid_raw_report_map_t REPORT_MAPS;
 };
