@@ -63,15 +63,15 @@ struct UserConfig {
     float    joystick_full_scale_rad = 0.14f;   // max rotation, adjust on PC
 
     // RGB LED
-    uint8_t  led_brightness = 30;   // percent
+    uint8_t  led_brightness  = 30;   // percent
     uint32_t led_color_plain = 0x000000; // 0xRRGGBB
-    bool     led_enabled    = true;
+    bool     led_enabled     = true;
 
     // HID
     uint8_t  hid_transport = 0;         // 0 = auto, 1 = BLE only, 2 = USB only
 
     // calibration (written back by Joystick::calibrate)
-    uint8_t  calib_calibrated = 0;
+    bool     calib_calibrated = false;
     float    calib_br[3] = { 0.0f, 0.0f, 0.0f };
     float    calib_pose_zero[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 };

@@ -109,6 +109,7 @@ class HID {
     public:
         enum class TransType : uint8_t {
             None,
+            Auto,
             Ble,
             Usb
         };
