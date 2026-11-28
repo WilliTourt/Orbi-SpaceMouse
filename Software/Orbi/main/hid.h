@@ -124,7 +124,7 @@ class HID {
         bool isConnected() const { return _connected; }
         TransType getTransType() const { return _trans_type; }
 
-        void HID::setPose(const float pose[6]); // x, y, z, rx, ry, rz
+        void setPose(const float pose[6]); // x, y, z, rx, ry, rz
         void setButton(uint8_t bit, bool triggered); // bit0..2 = xyz, bit3..5 = rx,ry,rz
         void setBattery(uint8_t percent); // only available for ble
         bool send();

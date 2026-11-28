@@ -20,8 +20,8 @@ constexpr UBaseType_t JOY_PRIO = 4;
 constexpr UBaseType_t LED_PRIO = 1;
 constexpr UBaseType_t HID_PRIO = 2;
 
-constexpr uint32_t KEY_PERIOD_MS = 1;
-constexpr uint32_t JOY_PERIOD_MS = 5;
+constexpr uint32_t KEY_PERIOD_MS = 8;
+constexpr uint32_t JOY_PERIOD_MS = 2;
 constexpr uint32_t LED_PERIOD_MS = 25;
 constexpr uint32_t HID_PERIOD_MS = 5;
 
@@ -41,7 +41,7 @@ enum class JoystickEvent : uint8_t {
 enum class HidEvent : uint8_t {
     None,
     Connected, Disconnected,
-    TransportChanged
+    TransChangedToUSB, TransChangedToBLE
 };
 
 bool start();

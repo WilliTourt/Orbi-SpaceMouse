@@ -8,8 +8,10 @@
 class Led {
     public:
         enum class KeyEvent : uint8_t {
-            Short,
-            Long
+            None,
+            ShortL, ShortR,
+            DoubleL, DoubleR,
+            LongL, LongR
         };
 
         struct Effects {
@@ -35,45 +37,46 @@ class Led {
                     TiltFollowPlain,    // Single color, brightness follows tilt
                     TiltFollowRainbow   // Rainbow color, brightness follows tilt
 
-                    // ... and more
-                };
+                    // ... and more (TODO
+                } joystick = Joystick::Default;
 
-                struct Key {
+                struct Key { // note: these effects should trigger when key is pressed DOWN
                     enum class ShortPress : uint8_t {
                         None,
-                        ShortPress
+                        ShortPressL,
+                        ShortPressR,
+                        ShortPressBoth
                     };
+                    // no double effects, will be two short effects? TODO
+
                     enum class LongPress : uint8_t {
                         None,
-                        LongPress
+                        LongPressL,
+                        LongPressR,
+                        LongPressBoth
                     };
                 };
-
-                // the two independent settings: what the stick does while it
-                // rests, and how the keys react
-                Joystick        joystick    = Joystick::Default;
+     
                 Key::ShortPress short_press = Key::ShortPress::None;
                 Key::LongPress  long_press  = Key::LongPress::None;
             };
 
-            // Live state of the light. Led owns exactly one Effects and every
-            // renderer works off it, so nothing effect related is scattered.
             SysEffect sys = SysEffect::Off;
             UsrEffect usr = UsrEffect{};
 
             uint32_t sys_started = 0;
             uint32_t usr_started = 0;
 
-            // key reaction in progress, key_len == 0 means there is none
-            uint32_t key_started = 0;
-            uint32_t key_len = 0;
-            KeyEvent key_event = KeyEvent::Short;
+            // key reaction in progress, key_len_ms == 0 means there is none
+            uint32_t key_started_ms = 0;
+            uint32_t key_len_ms = 0;
+            KeyEvent key_event = KeyEvent::None;
 
             // caculated and scaled from joystick rx and ry
             float tilt_x = 0.0f;
             float tilt_y = 0.0f;
 
-            uint8_t color_plain[3] = { 0, 0, 0 }; // single color R,G,B, from user config
+            uint8_t color_plain[3] = { 0, 224, 189 }; // single color R,G,B, from user config
         };
 
         // short names
@@ -88,6 +91,9 @@ class Led {
         void setUsrEffects(const UsrEffect &usr);
         // color_plain color used by the single color effects, comes from user config
         void setPlainColor(uint8_t r, uint8_t g, uint8_t b);
+
+        const UsrEffect& getUsrEffects() const { return _effects.usr; }
+        SysEffect getSysEffects() { return _effects.sys; }
         
         // tilt x,y are [-1.0, 1.0]
         void reactTilt(float x, float y);

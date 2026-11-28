@@ -46,7 +46,7 @@ void Led::setSysEffects(SysEffect effect) {
 
     if (effect == SysEffect::ReadyUsrEffect) {
         e.usr_started = e.sys_started;   // animation starts at its first frame
-        e.key_len = 0;
+        e.key_len_ms = 0;
     }
 }
 
@@ -69,15 +69,20 @@ void Led::reactTilt(float x, float y) {
 
 void Led::reactKey(KeyEvent event) {
     Effects &e = _effects;
-    if (event == KeyEvent::Short) {
-        if (e.usr.short_press == UsrEffect::Key::ShortPress::None) return;
-        e.key_len = KEY_SHORT_MS;
-    } else {
-        if (e.usr.long_press == UsrEffect::Key::LongPress::None) return;
-        e.key_len = KEY_LONG_MS;
+    switch (event) {
+        case KeyEvent::ShortL:
+        case KeyEvent::ShortR:
+            e.key_len_ms = KEY_SHORT_MS;
+            break;
+        case KeyEvent::LongL:
+        case KeyEvent::LongR:
+            e.key_len_ms = KEY_LONG_MS;
+            break;
+        default: return;
     }
+
     e.key_event = event;
-    e.key_started = nowMs();
+    e.key_started_ms = nowMs();
 }
 
 void Led::update() {
@@ -89,8 +94,8 @@ void Led::update() {
     if (e.sys != SysEffect::ReadyUsrEffect) {
         _applySys(now);
     } else {
-        if (e.key_len != 0 && (now - e.key_started) >= e.key_len) e.key_len = 0;
-        if (e.key_len != 0) _applyKey(now);
+        if (e.key_len_ms != 0 && (now - e.key_started_ms) >= e.key_len_ms) e.key_len_ms = 0;
+        if (e.key_len_ms != 0) _applyKey(now);
         else                _applyJoystick(now);
     }
     _strip->refresh();

@@ -177,5 +177,6 @@ extern "C" void app_main(void) {
     bringup();
 #else
     Sys::instance().start();
+    vTaskSuspend(NULL);
 #endif
 }
