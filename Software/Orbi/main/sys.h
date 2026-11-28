@@ -15,8 +15,8 @@
 
 #include "tasks.h"
 
-// Composition root and state machine. Everything else posts events here and
-// lets this decide what the board should be doing.
+
+
 class Sys {
     public:
         enum class State : uint8_t {
@@ -93,10 +93,11 @@ class Sys {
         PWR      _pwr;
 
         // queues
-        QueueHandle_t _event_queue = nullptr;    // joy/key/hid -> sys
-        QueueHandle_t _pose_hid_queue = nullptr; // joystick -> hid
-        QueueHandle_t _pose_led_queue = nullptr; // joystick -> led for light effects
-        QueueHandle_t _bat_hid_queue = nullptr;  // sys -> hid, battery val
+        QueueHandle_t _sys_event_queue  = nullptr; // joy/key/hid -> sys
+        QueueHandle_t _hid_pose_queue   = nullptr; // joystick -> hid
+        QueueHandle_t _led_pose_queue   = nullptr; // joystick -> led for light effects
+        QueueHandle_t _hid_bat_queue    = nullptr; // sys -> hid, battery val
+        QueueHandle_t _led_syseff_queue = nullptr; // sys -> led, Led::SysEffect
 
         // notifications
         // sys -> hid   key events (bits 5 - 0) and connection settings (bits higher)
@@ -119,7 +120,6 @@ class Sys {
         static constexpr uint32_t LED_BIT_KEY2_SHORT  = HID_BIT_KEY2_SHORT;
         static constexpr uint32_t LED_BIT_KEY2_DOUBLE = HID_BIT_KEY2_DOUBLE;
         static constexpr uint32_t LED_BIT_KEY2_LONG   = HID_BIT_KEY2_LONG;
-        static constexpr uint32_t LED_BIT_LOW_PWR     = 1u << 6;
         // TODO static constexpr uint32_t LED_CONN_XXX
 
         // joy notification bits
@@ -128,6 +128,12 @@ class Sys {
         TaskHandle_t _hid_task = nullptr;
         TaskHandle_t _led_task = nullptr;
         TaskHandle_t _joy_task = nullptr;
+
+        // slow bookkeeping done inside sysLoop
+        uint32_t _last_pwr_ms      = 0;
+        uint8_t  _last_bat_percent = 0xFF;
+        bool     _last_usb         = false;
+        bool     _hid_connected    = false;
 
         State _state = State::Boot;
 };
